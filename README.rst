@@ -3,7 +3,7 @@
 tqdm
 ====
 
-|PyPi-Status| |PyPi-Downloads| |PyPi-Versions|
+|PyPi-Status| |PyPi-Versions|
 
 |Build-Status| |Coverage-Status| |Branch-Coverage-Status|
 
@@ -69,7 +69,7 @@ Installation
 Latest pypi stable release
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-|PyPi-Status| |PyPi-Downloads|
+|PyPi-Status|
 
 .. code:: sh
 
@@ -127,7 +127,6 @@ Instantiation outside of the loop allows for manual control over ``tqdm()``:
     for char in pbar:
         pbar.set_description("Processing %s" % char)
 
-
 Manual
 ~~~~~~
 
@@ -151,7 +150,6 @@ but in this case don't forget to ``del`` or ``close()`` at the end:
     for i in range(10):
         pbar.update(10)
     pbar.close()
-
 
 Module
 ~~~~~~
@@ -200,7 +198,7 @@ Backing up a large directory?
 Documentation
 -------------
 
-|PyPi-Versions|
+|PyPi-Versions| |Readme-Hits| (Since 19 May 2016)
 
 .. code:: python
 
@@ -298,7 +296,6 @@ Extra CLI Options
     String buffer size in bytes [default: 256]
     used when `delim` is specified.
 
-
 Returns
 ~~~~~~~
 
@@ -379,6 +376,28 @@ Examples and Advanced Usage
 
 See the `examples <https://github.com/tqdm/tqdm/tree/master/examples>`__
 folder or import the module and run ``help()``.
+
+Nested progress bars
+~~~~~~~~~~~~~~~~~~~~
+
+``tqdm`` supports nested progress bars. Here's an example:
+
+.. code:: python
+
+    from tqdm import trange
+    from time import sleep
+
+    for i in trange(10, desc='1st loop'):
+        for j in trange(5, desc='2nd loop', leave=False):
+            for k in trange(100, desc='3nd loop'):
+                sleep(0.01)
+
+On Windows `colorama <https://github.com/tartley/colorama>`__ will be used if
+available to produce a beautiful nested display.
+
+For manual control over positioning (e.g. for multi-threaded use),
+you may specify `position=n` where `n=0` for the outermost bar,
+`n=1` for the next, and so on.
 
 Hooks and callbacks
 ~~~~~~~~~~~~~~~~~~~
@@ -473,28 +492,6 @@ own callbacks), see the
 `examples <https://github.com/tqdm/tqdm/tree/master/examples>`__
 folder or import the module and run ``help()``.
 
-Nested progress bars
-~~~~~~~~~~~~~~~~~~~~
-
-``tqdm`` supports nested progress bars. Here's an example:
-
-.. code:: python
-
-    from tqdm import trange
-    from time import sleep
-
-    for i in trange(10, desc='1st loop'):
-        for j in trange(5, desc='2nd loop', leave=False):
-            for k in trange(100, desc='3nd loop'):
-                sleep(0.01)
-
-On Windows `colorama <https://github.com/tartley/colorama>`__ will be used if
-available to produce a beautiful nested display.
-
-For manual control over positioning (e.g. for multi-threaded use),
-you may specify `position=n` where `n=0` for the outermost bar,
-`n=1` for the next, and so on.
-
 IPython/Jupyter Integration
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -519,7 +516,8 @@ light blue: no ETA); as demonstrated below.
 |Screenshot-Jupyter3|
 
 Writing messages
-~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~
+
 Since ``tqdm`` uses a simple printing mechanism to display progress bars,
 you should not write any message in the terminal using ``print()``.
 
@@ -542,6 +540,66 @@ display, a ``.write()`` method is provided:
 By default, this will print to standard output ``sys.stdout``. but you can
 specify any file-like object using the ``file`` argument. For example, this
 can be used to redirect the messages writing to a log file or class.
+
+Redirecting writing
+~~~~~~~~~~~~~~~~~~~
+
+If using a library that can print messages to the console, editing the library
+by  replacing ``print()`` with ``tqdm.write()`` may not be desirable.
+In that case, redirecting ``sys.stdout`` to ``tqdm.write()`` is an option.
+
+To redirect ``sys.stdout``, create a file-like class that will write
+any input string to ``tqdm.write()``, and supply the arguments
+``file=sys.stdout, dynamic_ncols=True``.
+
+A reusable canonical example is given below:
+
+.. code:: python
+
+    from time import sleep
+
+    import contextlib
+    import sys
+
+    from tqdm import tqdm
+
+    class DummyTqdmFile(object):
+        """Dummy file-like that will write to tqdm"""
+        file = None
+        def __init__(self, file):
+            self.file = file
+
+        def write(self, x):
+            # Avoid print() second call (useless \n)
+            if len(x.rstrip()) > 0:
+                tqdm.write(x, file=self.file)
+
+    @contextlib.contextmanager
+    def stdout_redirect_to_tqdm():
+        save_stdout = sys.stdout
+        try:
+            sys.stdout = DummyTqdmFile(sys.stdout)
+            yield save_stdout
+        # Relay exceptions
+        except Exception as exc:
+            raise exc
+        # Always restore sys.stdout if necessary
+        finally:
+            sys.stdout = save_stdout
+
+    def blabla():
+        print("Foo blabla")
+
+    # Redirect stdout to tqdm.write() (don't forget the `as save_stdout`)
+    with stdout_redirect_to_tqdm() as save_stdout:
+        # tqdm call need to specify sys.stdout, not sys.stderr (default)
+        # and dynamic_ncols=True to autodetect console width
+        for _ in tqdm(range(3), file=save_stdout, dynamic_ncols=True):
+            blabla()
+            sleep(.5)
+
+    # After the `with`, printing is restored
+    print('Done!')
 
 How to make a good progress bar
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -706,6 +764,7 @@ Licence
 Open Source (OSI approved): |Licence|
 
 Citation information: |DOI-URI|
+
 
 Authors
 -------
