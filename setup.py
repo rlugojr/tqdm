@@ -8,7 +8,7 @@ except ImportError:
     from distutils.core import setup
 import sys
 from subprocess import check_call
-from io import open
+from io import open as io_open
 
 # For Makefile parsing
 import shlex
@@ -21,7 +21,7 @@ except ImportError:  # pragma: no cover
 import re
 
 
-""" Makefile auxiliary functions """
+# Makefile auxiliary functions #
 
 RE_MAKE_CMD = re.compile('^\t(@\+?)(make)?', flags=re.M)
 
@@ -37,7 +37,7 @@ def parse_makefile_aliases(filepath):
     # -- Parsing the Makefile using ConfigParser
     # Adding a fake section to make the Makefile a valid Ini file
     ini_str = '[root]\n'
-    with open(filepath, mode='r') as fd:
+    with io_open(filepath, mode='r') as fd:
         ini_str = ini_str + RE_MAKE_CMD.sub('\t', fd.read())
     ini_fp = StringIO.StringIO(ini_str)
     # Parse using ConfigParser
@@ -113,21 +113,22 @@ def execute_makefile_commands(commands, alias, verbose=False):
             if verbose:
                 print("Running command: " + cmd)
             # Launch the command and wait to finish (synchronized call)
-            check_call(parsed_cmd)
+            check_call(parsed_cmd,
+                       cwd=os.path.dirname(os.path.abspath(__file__)))
 
 
-""" Main setup.py config """
+# Main setup.py config #
 
 # Get version from tqdm/_version.py
 __version__ = None
 version_file = os.path.join(os.path.dirname(__file__), 'tqdm', '_version.py')
-with open(version_file, mode='r') as fd:
+with io_open(version_file, mode='r') as fd:
     exec(fd.read())
 
 # Executing makefile commands if specified
 if sys.argv[1].lower().strip() == 'make':
     # Filename of the makefile
-    fpath = 'Makefile'
+    fpath = os.path.join(os.path.dirname(__file__), 'Makefile')
     # Parse the makefile, substitute the aliases and extract the commands
     commands = parse_makefile_aliases(fpath)
 
@@ -154,17 +155,18 @@ if sys.argv[1].lower().strip() == 'make':
     sys.exit(0)
 
 
-""" Python package config """
+# Python package config #
 
 README_rst = ''
-with open('README.rst', mode='r', encoding='utf-8') as fd:
+fndoc = os.path.join(os.path.dirname(__file__), 'README.rst')
+with io_open(fndoc, mode='r', encoding='utf-8') as fd:
     README_rst = fd.read()
 
 setup(
     name='tqdm',
     version=__version__,
-    description='A Fast, Extensible Progress Meter',
-    license='MPLv2.0, MIT Licenses',
+    description='Fast, Extensible Progress Meter',
+    license='MPLv2.0, MIT Licences',
     author='Noam Yorav-Raphael',
     author_email='noamraph@gmail.com',
     url='https://github.com/tqdm/tqdm',
@@ -198,6 +200,7 @@ setup(
         'Programming Language :: Python :: 3.3',
         'Programming Language :: Python :: 3.4',
         'Programming Language :: Python :: 3.5',
+        'Programming Language :: Python :: 3.6',
         'Programming Language :: Python :: Implementation :: PyPy',
         'Programming Language :: Python :: Implementation :: IronPython',
         'Topic :: Software Development :: Libraries',

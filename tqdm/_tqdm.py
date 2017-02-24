@@ -8,14 +8,17 @@ Usage:
   ...     ...
 """
 from __future__ import absolute_import
-# future division is important to divide integers and get as
-# a result precise floating numbers (instead of truncated int)
+# integer division / : float, // : int
 from __future__ import division
-# import compatibility functions and utilities
+# compatibility functions and utilities
 from ._utils import _supports_unicode, _environ_cols_wrapper, _range, _unich, \
-    _term_move_up, _unicode, WeakSet
+    _term_move_up, _unicode, WeakSet, _basestring, _OrderedDict
+# native libraries
 import sys
+from numbers import Number
+from threading import Thread
 from time import time
+from time import sleep
 
 
 __author__ = {"github.com/": ["noamraph", "obiwanus", "kmike", "hadim",
@@ -41,12 +44,91 @@ class TqdmDeprecationWarning(Exception):
             super(TqdmDeprecationWarning, self).__init__(msg, *a, **k)
 
 
+class TMonitor(Thread):
+    """
+    Monitoring thread for tqdm bars.
+    Monitors if tqdm bars are taking too much time to display
+    and readjusts miniters automatically if necessary.
+
+    Parameters
+    ----------
+    tqdm_cls  : class
+        tqdm class to use (can be core tqdm or a submodule).
+    sleep_interval  : fload
+        Time to sleep between monitoring checks.
+    """
+
+    # internal vars for unit testing
+    _time = None
+    _sleep = None
+
+    def __init__(self, tqdm_cls, sleep_interval):
+        # setcheckinterval is deprecated
+        getattr(sys, 'setswitchinterval',
+                getattr(sys, 'setcheckinterval'))(100)
+        Thread.__init__(self)
+        self.daemon = True  # kill thread when main killed (KeyboardInterrupt)
+        self.was_killed = False
+        self.woken = 0  # last time woken up, to sync with monitor
+        self.tqdm_cls = tqdm_cls
+        self.sleep_interval = sleep_interval
+        if TMonitor._time is not None:
+            self._time = TMonitor._time
+        else:
+            self._time = time
+        if TMonitor._sleep is not None:
+            self._sleep = TMonitor._sleep
+        else:
+            self._sleep = sleep
+        self.start()
+
+    def exit(self):
+        self.was_killed = True
+        # self.join()  # DO NOT, blocking event, slows down tqdm at closing
+        return self.report()
+
+    def run(self):
+        cur_t = self._time()
+        while True:
+            # After processing and before sleeping, notify that we woke
+            # Need to be done just before sleeping
+            self.woken = cur_t
+            # Sleep some time...
+            self._sleep(self.sleep_interval)
+            # Quit if killed
+            # if self.exit_event.is_set():  # TODO: should work but does not...
+            if self.was_killed:
+                return
+            # Then monitor!
+            cur_t = self._time()
+            # Check for each tqdm instance if one is waiting too long to print
+            # NB: copy avoids size change during iteration RuntimeError
+            for instance in self.tqdm_cls._instances.copy():
+                # Only if mininterval > 1 (else iterations are just slow)
+                # and last refresh was longer than maxinterval in this instance
+                if instance.miniters > 1 and \
+                  (cur_t - instance.last_print_t) >= instance.maxinterval:
+                    # We force bypassing miniters on next iteration
+                    # dynamic_miniters should adjust mininterval automatically
+                    instance.miniters = 1
+                    # Refresh now! (works only for manual tqdm)
+                    instance.refresh()
+
+    def report(self):
+        # return self.is_alive()  # TODO: does not work...
+        return not self.was_killed
+
+
 class tqdm(object):
     """
     Decorate an iterable object, returning an iterator which acts exactly
     like the original iterable, but prints a dynamically updating
     progressbar every time a value is requested.
     """
+
+    monitor_interval = 10  # set to 0 to disable the thread
+    monitor = None
+
     @staticmethod
     def format_sizeof(num, suffix=''):
         """
@@ -121,7 +203,7 @@ class tqdm(object):
     @staticmethod
     def format_meter(n, total, elapsed, ncols=None, prefix='',
                      ascii=False, unit='it', unit_scale=False, rate=None,
-                     bar_format=None):
+                     bar_format=None, postfix=None):
         """
         Return a string-based progress bar given some parameters
 
@@ -159,9 +241,11 @@ class tqdm(object):
             Specify a custom bar string formatting. May impact performance.
             [default: '{l_bar}{bar}{r_bar}'], where l_bar is
             '{desc}{percentage:3.0f}%|' and r_bar is
-            '| {n_fmt}/{total_fmt} [{elapsed_str}<{remaining_str}, {rate_fmt}]'
+            '| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]'
             Possible vars: bar, n, n_fmt, total, total_fmt, percentage,
             rate, rate_fmt, elapsed, remaining, l_bar, r_bar, desc.
+        postfix  : str, optional
+            Same as prefix but will be placed at the end as additional stats.
 
         Returns
         -------
@@ -206,8 +290,9 @@ class tqdm(object):
             # format the stats displayed to the left and right sides of the bar
             l_bar = (prefix if prefix else '') + \
                 '{0:3.0f}%|'.format(percentage)
-            r_bar = '| {0}/{1} [{2}<{3}, {4}]'.format(
-                    n_fmt, total_fmt, elapsed_str, remaining_str, rate_fmt)
+            r_bar = '| {0}/{1} [{2}<{3}, {4}{5}]'.format(
+                    n_fmt, total_fmt, elapsed_str, remaining_str, rate_fmt,
+                    ', '+postfix if postfix else '')
 
             if ncols == 0:
                 return l_bar[:-1] + r_bar[1:]
@@ -232,6 +317,7 @@ class tqdm(object):
                             'l_bar': l_bar,
                             'r_bar': r_bar,
                             'desc': prefix if prefix else '',
+                            'postfix': ', '+postfix if postfix else '',
                             # 'bar': full_bar  # replaced by procedure below
                             }
 
@@ -280,8 +366,9 @@ class tqdm(object):
 
         # no total: no progressbar, ETA, just progress stats
         else:
-            return (prefix if prefix else '') + '{0}{1} [{2}, {3}]'.format(
-                n_fmt, unit, elapsed_str, rate_fmt)
+            return (prefix if prefix else '') + '{0}{1} [{2}, {3}{4}]'.format(
+                n_fmt, unit, elapsed_str, rate_fmt,
+                ', '+postfix if postfix else '')
 
     def __new__(cls, *args, **kwargs):
         # Create a new instance
@@ -290,6 +377,10 @@ class tqdm(object):
         if "_instances" not in cls.__dict__:
             cls._instances = WeakSet()
         cls._instances.add(instance)
+        # Create the monitoring thread
+        if cls.monitor_interval and (cls.monitor is None or
+                                     not cls.monitor.report()):
+            cls.monitor = TMonitor(cls, cls.monitor_interval)
         # Return the instance
         return instance
 
@@ -315,6 +406,14 @@ class tqdm(object):
             for inst in cls._instances:
                 if inst.pos > instance.pos:
                     inst.pos -= 1
+            # Kill monitor if no instances are left
+            if not cls._instances and cls.monitor:
+                cls.monitor.exit()
+                try:
+                    del cls.monitor
+                except AttributeError:
+                    pass
+                cls.monitor = None
         except KeyError:
             pass
 
@@ -340,7 +439,9 @@ class tqdm(object):
         fp.write(end)
         # Force refresh display of bars we cleared
         for inst in inst_cleared:
-            inst.refresh()
+            # Avoid race conditions by checking that the instance started
+            if hasattr(inst, 'start_t'):  # pragma: nocover
+                inst.refresh()
         # TODO: make list of all instances incl. absolutely positioned ones?
 
     @classmethod
@@ -451,6 +552,7 @@ class tqdm(object):
                  maxinterval=10.0, miniters=None, ascii=None, disable=False,
                  unit='it', unit_scale=False, dynamic_ncols=False,
                  smoothing=0.3, bar_format=None, initial=0, position=None,
+                 postfix=None,
                  gui=False, **kwargs):
         """
         Parameters
@@ -481,18 +583,26 @@ class tqdm(object):
             fallback is a meter width of 10 and no limit for the counter and
             statistics. If 0, will not print any meter (only stats).
         mininterval  : float, optional
-            Minimum progress update interval, in seconds [default: 0.1].
+            Minimum progress display update interval, in seconds [default: 0.1].
         maxinterval  : float, optional
-            Maximum progress update interval, in seconds [default: 10.0].
+            Maximum progress display update interval, in seconds [default: 10].
+            Automatically adjusts `miniters` to correspond to `mininterval`
+            after long display update lag. Only works if `dynamic_miniters`
+            or monitor thread is enabled.
         miniters  : int, optional
-            Minimum progress update interval, in iterations.
-            If specified, will set `mininterval` to 0.
+            Minimum progress display update interval, in iterations.
+            If 0 and `dynamic_miniters`, will automatically adjust to equal
+            `mininterval` (more CPU efficient, good for tight loops).
+            If > 0, will skip display of specified number of iterations.
+            Tweak this and `mininterval` to get very efficient loops.
+            If your progress is erratic with both fast and slow iterations
+            (network, skipping items, etc) you should set miniters=1.
         ascii  : bool, optional
             If unspecified or False, use unicode (smooth blocks) to fill
             the meter. The fallback is to use ASCII characters `1-9 #`.
-        disable  : bool, optional
+        disable  : bool or None, optional
             Whether to disable the entire progressbar wrapper
-            [default: False].
+            [default: False]. If set to None, disable on non-TTY.
         unit  : str, optional
             String that will be used to define the unit of each iteration
             [default: it].
@@ -512,7 +622,7 @@ class tqdm(object):
             Specify a custom bar string formatting. May impact performance.
             If unspecified, will use '{l_bar}{bar}{r_bar}', where l_bar is
             '{desc}{percentage:3.0f}%|' and r_bar is
-            '| {n_fmt}/{total_fmt} [{elapsed_str}<{remaining_str}, {rate_fmt}]'
+            '| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]'
             Possible vars: bar, n, n_fmt, total, total_fmt, percentage,
             rate, rate_fmt, elapsed, remaining, l_bar, r_bar, desc.
         initial  : int, optional
@@ -522,6 +632,8 @@ class tqdm(object):
             Specify the line offset to print this bar (starting from 0)
             Automatic if unspecified.
             Useful to manage multiple bars at once (eg, from threads).
+        postfix  : dict, optional
+            Specify additional stats to display at the end of the bar.
         gui  : bool, optional
             WARNING: internal parameter - do not use.
             Use tqdm_gui(...) instead. If set, will attempt to use
@@ -531,6 +643,10 @@ class tqdm(object):
         -------
         out  : decorated iterator.
         """
+
+        if disable is None and hasattr(file, "isatty") and not file.isatty():
+            disable = True
+
         if disable:
             self.iterable = iterable
             self.disable = disable
@@ -606,6 +722,9 @@ class tqdm(object):
         self.avg_time = None
         self._time = time
         self.bar_format = bar_format
+        self.postfix = None
+        if postfix:
+            self.set_postfix(**postfix)
 
         # Init the iterations counters
         self.last_print_n = initial
@@ -622,12 +741,15 @@ class tqdm(object):
                 self.moveto(self.pos)
             self.sp(self.format_meter(self.n, total, 0,
                     (dynamic_ncols(file) if dynamic_ncols else ncols),
-                    self.desc, ascii, unit, unit_scale, None, bar_format))
+                    self.desc, ascii, unit, unit_scale, None, bar_format,
+                    self.postfix))
             if self.pos:
                 self.moveto(-self.pos)
 
         # Init the time counter
-        self.start_t = self.last_print_t = self._time()
+        self.last_print_t = self._time()
+        # NB: Avoid race conditions by setting start_t at the very end of init
+        self.start_t = self.last_print_t
 
     def __len__(self):
         return (self.iterable.shape[0] if hasattr(self.iterable, 'shape')
@@ -646,25 +768,20 @@ class tqdm(object):
 
     def __repr__(self):
         return self.format_meter(self.n, self.total,
-                                 time() - self.last_print_t,
+                                 self._time() - self.start_t,
                                  self.ncols, self.desc, self.ascii, self.unit,
                                  self.unit_scale, 1 / self.avg_time
-                                 if self.avg_time else None, self.bar_format)
+                                 if self.avg_time else None, self.bar_format,
+                                 self.postfix)
 
     def __lt__(self, other):
-        # try:
         return self.pos < other.pos
-        # except AttributeError:
-        #     return self.start_t < other.start_t
 
     def __le__(self, other):
         return (self < other) or (self == other)
 
     def __eq__(self, other):
-        # try:
         return self.pos == other.pos
-        # except AttributeError:
-        #     return self.start_t == other.start_t
 
     def __ne__(self, other):
         return not (self == other)
@@ -722,14 +839,15 @@ Please use `tqdm_gui(...)` instead of `tqdm(..., gui=True)`
                 # Note: does not call self.update(1) for speed optimisation.
                 n += 1
                 # check the counter first (avoid calls to time())
-                if n - last_print_n >= miniters:
-                    delta_it = n - last_print_n
-                    cur_t = _time()
-                    delta_t = cur_t - last_print_t
+                if n - last_print_n >= self.miniters:
+                    miniters = self.miniters  # watch monitoring thread changes
+                    delta_t = _time() - last_print_t
                     if delta_t >= mininterval:
-                        elapsed = cur_t - start_t
+                        cur_t = _time()
+                        delta_it = n - last_print_n
+                        elapsed = cur_t - start_t  # optimised if in inner loop
                         # EMA (not just overall average)
-                        if smoothing and delta_t:
+                        if smoothing and delta_t and delta_it:
                             avg_time = delta_t / delta_it \
                                 if avg_time is None \
                                 else smoothing * delta_t / delta_it + \
@@ -744,34 +862,45 @@ Please use `tqdm_gui(...)` instead of `tqdm(..., gui=True)`
                             (dynamic_ncols(self.fp) if dynamic_ncols
                              else ncols),
                             self.desc, ascii, unit, unit_scale,
-                            1 / avg_time if avg_time else None, bar_format))
+                            1 / avg_time if avg_time else None, bar_format,
+                            self.postfix))
 
                         if self.pos:
                             self.moveto(-self.pos)
 
                         # If no `miniters` was specified, adjust automatically
-                        # to the maximum iteration rate seen so far.
+                        # to the max iteration rate seen so far between 2 prints
                         if dynamic_miniters:
-                            if maxinterval and delta_t > maxinterval:
-                                # Set miniters to correspond to maxinterval
-                                miniters = delta_it * maxinterval / delta_t
-                            elif mininterval and delta_t:
+                            if maxinterval and delta_t >= maxinterval:
+                                # Adjust miniters to time interval by rule of 3
+                                if mininterval:
+                                    # Set miniters to correspond to mininterval
+                                    miniters = delta_it * mininterval / delta_t
+                                else:
+                                    # Set miniters to correspond to maxinterval
+                                    miniters = delta_it * maxinterval / delta_t
+                            elif smoothing:
                                 # EMA-weight miniters to converge
                                 # towards the timeframe of mininterval
-                                miniters = smoothing * delta_it * mininterval \
-                                    / delta_t + (1 - smoothing) * miniters
+                                miniters = smoothing * delta_it * \
+                                              (mininterval / delta_t
+                                               if mininterval and delta_t
+                                               else 1) + \
+                                              (1 - smoothing) * miniters
                             else:
-                                miniters = smoothing * delta_it + \
-                                    (1 - smoothing) * miniters
+                                # Maximum nb of iterations between 2 prints
+                                miniters = max(miniters, delta_it)
 
                         # Store old values for next call
                         self.n = self.last_print_n = last_print_n = n
                         self.last_print_t = last_print_t = cur_t
+                        self.miniters = miniters
 
             # Closing the progress bar.
             # Update some internal variables for close().
             self.last_print_n = last_print_n
             self.n = n
+            self.miniters = miniters
             self.close()
 
     def update(self, n=1):
@@ -801,15 +930,15 @@ Please use `tqdm_gui(...)` instead of `tqdm(..., gui=True)`
             raise ValueError("n ({0}) cannot be negative".format(n))
         self.n += n
 
-        delta_it = self.n - self.last_print_n  # should be n?
-        if delta_it >= self.miniters:
+        if self.n - self.last_print_n >= self.miniters:
             # We check the counter first, to reduce the overhead of time()
-            cur_t = self._time()
-            delta_t = cur_t - self.last_print_t
+            delta_t = self._time() - self.last_print_t
             if delta_t >= self.mininterval:
+                cur_t = self._time()
+                delta_it = self.n - self.last_print_n  # should be n?
                 elapsed = cur_t - self.start_t
                 # EMA (not just overall average)
-                if self.smoothing and delta_t:
+                if self.smoothing and delta_t and delta_it:
                     self.avg_time = delta_t / delta_it \
                         if self.avg_time is None \
                         else self.smoothing * delta_t / delta_it + \
@@ -830,27 +959,32 @@ Please use `tqdm_gui(...)` instead of `tqdm(..., gui=True)`
                      else self.ncols),
                     self.desc, self.ascii, self.unit, self.unit_scale,
                     1 / self.avg_time if self.avg_time else None,
-                    self.bar_format))
+                    self.bar_format, self.postfix))
 
                 if self.pos:
                     self.moveto(-self.pos)
 
                 # If no `miniters` was specified, adjust automatically to the
-                # maximum iteration rate seen so far.
+                # maximum iteration rate seen so far between two prints.
                 # e.g.: After running `tqdm.update(5)`, subsequent
                 # calls to `tqdm.update()` will only cause an update after
                 # at least 5 more iterations.
                 if self.dynamic_miniters:
-                    if self.maxinterval and delta_t > self.maxinterval:
-                        self.miniters = self.miniters * self.maxinterval \
-                            / delta_t
-                    elif self.mininterval and delta_t:
-                        self.miniters = self.smoothing * delta_it \
-                            * self.mininterval / delta_t + \
-                            (1 - self.smoothing) * self.miniters
+                    if self.maxinterval and delta_t >= self.maxinterval:
+                        if self.mininterval:
+                            self.miniters = delta_it * self.mininterval \
+                                        / delta_t
+                        else:
+                            self.miniters = delta_it * self.maxinterval \
+                                        / delta_t
+                    elif self.smoothing:
+                        self.miniters = self.smoothing * delta_it * \
+                                        (self.mininterval / delta_t
+                                         if self.mininterval and delta_t
+                                         else 1) + \
+                                        (1 - self.smoothing) * self.miniters
                     else:
-                        self.miniters = self.smoothing * delta_it + \
-                            (1 - self.smoothing) * self.miniters
+                        self.miniters = max(self.miniters, delta_it)
 
                 # Store old values for next call
                 self.last_print_n = self.n
@@ -897,7 +1031,7 @@ Please use `tqdm_gui(...)` instead of `tqdm(..., gui=True)`
                     (self.dynamic_ncols(self.fp) if self.dynamic_ncols
                      else self.ncols),
                     self.desc, self.ascii, self.unit, self.unit_scale, None,
-                    self.bar_format))
+                    self.bar_format, self.postfix))
             if pos:
                 self.moveto(-pos)
             else:
@@ -923,6 +1057,28 @@ Please use `tqdm_gui(...)` instead of `tqdm(..., gui=True)`
         """
         self.desc = desc + ': ' if desc else ''
 
+    def set_postfix(self, ordered_dict=None, **kwargs):
+        """
+        Set/modify postfix (additional stats)
+        with automatic formatting based on datatype.
+        """
+        # Sort in alphabetical order to be more deterministic
+        postfix = _OrderedDict([] if ordered_dict is None else ordered_dict)
+        for key in sorted(kwargs.keys()):
+            postfix[key] = kwargs[key]
+        # Preprocess stats according to datatype
+        for key in postfix.keys():
+            # Number: limit the length of the string
+            if isinstance(postfix[key], Number):
+                postfix[key] = '{0:2.3g}'.format(postfix[key])
+            # Else for any other type, try to get the string conversion
+            elif not isinstance(postfix[key], _basestring):
+                postfix[key] = str(postfix[key])
+            # Else if it's a string, don't need to preprocess anything
+        # Stitch together to get the final postfix
+        self.postfix = ', '.join(key + '=' + postfix[key].strip()
+                                 for key in postfix.keys())
+
     def moveto(self, n):
         self.fp.write(_unicode('\n' * n + _term_move_up() * -n))
 
@@ -930,6 +1086,9 @@ Please use `tqdm_gui(...)` instead of `tqdm(..., gui=True)`
         """
         Clear current bar display
         """
+        if self.disable:
+            return
+
         if not nomove:
             self.moveto(self.pos)
         # clear up the bar (can't rely on sp(''))
@@ -943,6 +1102,9 @@ Please use `tqdm_gui(...)` instead of `tqdm(..., gui=True)`
         """
         Force refresh the display of this bar
         """
+        if self.disable:
+            return
+
         self.moveto(self.pos)
         # clear up this line's content (whatever there was)
         self.clear(nomove=True)

@@ -48,10 +48,7 @@ all:
 	@+make build
 
 flake8:
-	@+flake8 --max-line-length=80 --count --statistics --exit-zero tqdm/
-	@+flake8 --max-line-length=80 --count --statistics --exit-zero examples/
-	@+flake8 --max-line-length=80 --count --statistics --exit-zero .
-	@+flake8 --max-line-length=80 --count --statistics --exit-zero tqdm/tests/
+	@+flake8 --max-line-length=80 --count --statistics --exit-zero -j 8 --exclude .asv .
 
 test:
 	tox --skip-missing-interpreters
@@ -73,6 +70,18 @@ testperf:  # do not use coverage (which is extremely slow)
 testtimer:
 	nosetests tqdm --with-timer -d -v
 
+testasv:
+	asv run -j 8 HEAD~3..HEAD
+	@make viewasv
+
+testasvfull:
+	asv run -j 8 v1.0.0..master
+	@make testasv
+
+viewasv:
+	asv publish
+	asv preview
+
 distclean:
 	@+make coverclean
 	@+make prebuildclean
@@ -87,6 +96,7 @@ clean:
 	@+python -c "import os; import glob; [os.remove(i) for i in glob.glob('*.py[co]')]"
 	@+python -c "import os; import glob; [os.remove(i) for i in glob.glob('tqdm/*.py[co]')]"
 	@+python -c "import os; import glob; [os.remove(i) for i in glob.glob('tqdm/tests/*.py[co]')]"
+	@+python -c "import os; import glob; [os.remove(i) for i in glob.glob('tqdm/examples/*.py[co]')]"
 
 installdev:
 	python setup.py develop --uninstall
